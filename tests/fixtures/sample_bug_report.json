@@ -1,0 +1,6 @@
+# tests/fixtures/sample_bug_report.json
+# Used by test_repo_analysis.py as a canned bug report fixture.
+{
+    "bug_report": "IndexError: list index out of range in utils.py at line 42 inside get_items function",
+    "repo_url": "__FIXTURE_REPO__"
+}
