@@ -3,11 +3,11 @@
 #
 # Sections:
 #   [core]         — always required
-#   [agent]        — LangGraph pipeline (Task 3)
+#   [agent]        — LangGraph pipeline
 #   [llm-watsonx]  — IBM watsonx.ai (primary LLM provider)
 #   [llm-openai]   — OpenAI-compatible fallback (optional)
-#   [backend]      — FastAPI (Task 4, not yet implemented)
-#   [frontend]     — Streamlit UI (Task 5, not yet implemented)
+#   [backend]      — FastAPI + Uvicorn
+#   [frontend]     — Streamlit UI
 #   [dev/test]     — development & CI tools
 
 # ── [core] ─────────────────────────────────────────────────────────────────
@@ -19,28 +19,22 @@ langgraph>=0.2.0              # LangGraph stateful agent orchestration
 langchain-core>=0.2.0         # Base LangChain interfaces used by LangGraph
 
 # ── [llm-watsonx] ──────────────────────────────────────────────────────────
-# Uncomment when watsonx.ai credentials are available:
-# ibm-watsonx-ai>=1.1.0
+# Install to enable IBM watsonx.ai / Granite models (recommended):
+ibm-watsonx-ai>=1.1.0
 
 # ── [llm-openai] ───────────────────────────────────────────────────────────
-# Uncomment to enable the OpenAI-compatible fallback:
+# Install to enable the OpenAI-compatible fallback (gpt-4o, Ollama, etc.):
 # openai>=1.30.0
 
 # ── [backend] ──────────────────────────────────────────────────────────────
 fastapi>=0.111.0              # FastAPI web framework
 uvicorn[standard]>=0.30.0     # ASGI server
 httpx>=0.27.0                 # HTTP client — required by FastAPI TestClient
-pydantic>=2.7.0               # Already needed for backend/models/schemas.py
+pydantic>=2.7.0               # Request/response models
 
 # ── [frontend] ─────────────────────────────────────────────────────────────
-# Uncomment when implementing Task 5 (Streamlit UI):
-# streamlit>=1.36.0
-
-# ── [repo analysis tools] ───────────────────────────────────────────────────
-# Uncomment when implementing Track B (repo_analyzer node):
-# gitpython>=3.1.43
-# tree-sitter>=0.22.0
+streamlit>=1.36.0             # Streamlit UI framework
 
 # ── [dev/test] ─────────────────────────────────────────────────────────────
 pytest>=8.0.0
-pytest-asyncio>=0.23.0        # async test support (for future FastAPI tests)
+pytest-asyncio>=0.23.0        # async test support
