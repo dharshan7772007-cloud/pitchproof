@@ -1,0 +1,46 @@
+# Pitchproof — Python dependencies
+# Install with: pip install -r requirements.txt
+#
+# Sections:
+#   [core]         — always required
+#   [agent]        — LangGraph pipeline (Task 3)
+#   [llm-watsonx]  — IBM watsonx.ai (primary LLM provider)
+#   [llm-openai]   — OpenAI-compatible fallback (optional)
+#   [backend]      — FastAPI (Task 4, not yet implemented)
+#   [frontend]     — Streamlit UI (Task 5, not yet implemented)
+#   [dev/test]     — development & CI tools
+
+# ── [core] ─────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0          # .env file loading
+typing_extensions>=4.10.0     # TypedDict, Annotated back-compat
+
+# ── [agent] ────────────────────────────────────────────────────────────────
+langgraph>=0.2.0              # LangGraph stateful agent orchestration
+langchain-core>=0.2.0         # Base LangChain interfaces used by LangGraph
+
+# ── [llm-watsonx] ──────────────────────────────────────────────────────────
+# Uncomment when watsonx.ai credentials are available:
+# ibm-watsonx-ai>=1.1.0
+
+# ── [llm-openai] ───────────────────────────────────────────────────────────
+# Uncomment to enable the OpenAI-compatible fallback:
+# openai>=1.30.0
+
+# ── [backend] ──────────────────────────────────────────────────────────────
+# Uncomment when implementing Task 4 (FastAPI backend):
+# fastapi>=0.111.0
+# uvicorn[standard]>=0.30.0
+pydantic>=2.7.0               # Already needed for backend/models/schemas.py
+
+# ── [frontend] ─────────────────────────────────────────────────────────────
+# Uncomment when implementing Task 5 (Streamlit UI):
+# streamlit>=1.36.0
+
+# ── [repo analysis tools] ───────────────────────────────────────────────────
+# Uncomment when implementing Track B (repo_analyzer node):
+# gitpython>=3.1.43
+# tree-sitter>=0.22.0
+
+# ── [dev/test] ─────────────────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-asyncio>=0.23.0        # async test support (for future FastAPI tests)
