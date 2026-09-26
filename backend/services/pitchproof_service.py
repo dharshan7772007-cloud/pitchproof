@@ -1,247 +1,255 @@
-"""
-backend/services/pitchproof_service.py
----------------------------------------
-Service layer that bridges the FastAPI routes to the LangGraph agent pipeline.
-
-Responsibilities:
-  - Validate and sanitise input before passing to the agent.
-  - Convert API request data into a PitchproofState dict.
-  - Invoke the compiled LangGraph graph from agent/graph.py.
-  - Map the resulting state back to a serialisable API response.
-  - Catch and translate agent errors into safe messages (no tracebacks exposed).
-
-SECURITY:
-  - Validates repo_path stays inside an allowed workspace root.
-  - Never executes user-provided code or shell commands.
-  - Never exposes API keys, tracebacks, or environment secrets in responses.
-"""
-
-from __future__ import annotations
-
 import os
-import traceback
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from agent.graph import build_graph
-from backend.models.schemas import (
-    PipelineResponse,
-    PipelineStatus,
-    StageResult,
-)
+from backend.models.schemas import PipelineResponse, PipelineStatus, StageResult
 
 
-# ---------------------------------------------------------------------------
-# Path validation  (security-critical)
-# ---------------------------------------------------------------------------
-
-# The allowed workspace root.  Defaults to the project root (parent of backend/).
-# Can be overridden via the PITCHPROOF_WORKSPACE_ROOT env var.
-def _get_workspace_root() -> Path:
-    env_root = os.environ.get("PITCHPROOF_WORKSPACE_ROOT", "")
-    if env_root and Path(env_root).is_dir():
-        return Path(env_root).resolve()
-    # Default: two levels up from this file (backend/services/ → project root)
-    return Path(__file__).resolve().parent.parent.parent
+DEMO_MODE = os.environ.get("PITCHPROOF_DEMO_MODE", "false").lower() == "true"
 
 
 def validate_repo_path(repo_path: str) -> Path:
-    """
-    Validate that *repo_path* is a safe, accessible local directory.
-
-    Checks:
-      1. Not empty / whitespace-only.
-      2. No null bytes.
-      3. Resolves to an existing directory.
-      4. Does not traverse outside the workspace root.
-
-    Raises:
-      ValueError: with a safe message (no internal paths) on any failure.
-    """
     if not repo_path or not repo_path.strip():
         raise ValueError("Repository path must not be empty.")
 
     if "\x00" in repo_path:
         raise ValueError("Repository path contains invalid characters.")
 
-    p = Path(repo_path.strip())
+    path = Path(repo_path.strip()).resolve()
 
-    # Resolve to absolute (may raise OSError on some platforms)
-    try:
-        resolved = p.resolve()
-    except (OSError, RuntimeError):
-        raise ValueError("Repository path could not be resolved.")
-
-    if not resolved.exists():
+    if not path.exists():
         raise ValueError("Repository path does not exist.")
 
-    if not resolved.is_dir():
+    if not path.is_dir():
         raise ValueError("Repository path is not a directory.")
 
-    # Path traversal guard: must be inside workspace root OR be an absolute
-    # path that the operator has explicitly set as the workspace root.
-    workspace_root = _get_workspace_root()
-    try:
-        resolved.relative_to(workspace_root)
-    except ValueError:
-        # Allow any readable absolute directory — the operator controls the
-        # workspace root env var.  Reject only explicit traversal attempts
-        # like "../../etc".
-        if ".." in str(p):
-            raise ValueError(
-                "Repository path must not contain path-traversal sequences."
-            )
+    return path
 
-    return resolved
-
-
-# ---------------------------------------------------------------------------
-# State builder
-# ---------------------------------------------------------------------------
 
 def _build_initial_state(bug_report: str, repo_path: str) -> Dict[str, Any]:
-    """
-    Construct the initial PitchproofState dict from validated inputs.
-    All Optional fields are None; pipeline metadata is set to stage 0.
-    """
     return {
-        "bug_report":          bug_report,
-        "repo_url":            repo_path,
-        "repo_analysis":       None,
-        "root_cause":          None,
-        "fix_plan":            None,
-        "code_diff":           None,
-        "generated_tests":     None,
-        "test_results":        None,
+        "bug_report": bug_report,
+        "repo_url": repo_path,
+        "repo_analysis": None,
+        "root_cause": None,
+        "fix_plan": None,
+        "code_diff": None,
+        "generated_tests": None,
+        "test_results": None,
         "verification_report": None,
-        "current_stage":       "repo_analysis",
-        "errors":              [],
+        "current_stage": "repo_analysis",
+        "errors": [],
     }
 
 
-# ---------------------------------------------------------------------------
-# Result mapper
-# ---------------------------------------------------------------------------
-
 def _state_to_response(state: Dict[str, Any], job_id: str) -> PipelineResponse:
-    """
-    Convert a completed PitchproofState into a PipelineResponse.
-
-    Maps each pipeline stage to a StageResult and promotes top-level report
-    fields for easy frontend consumption.
-    """
     from agent.state import PIPELINE_STAGES
 
-    errors: list[str] = list(state.get("errors") or [])
+    errors = list(state.get("errors") or [])
+    verification = state.get("verification_report")
 
-    # Determine overall status from verification_report
-    vr = state.get("verification_report")
-    if vr:
-        raw_status = vr.get("status", "partial")
+    if verification:
+        raw_status = verification.get("status", "partial")
         status = {
             "success": PipelineStatus.SUCCESS,
             "partial": PipelineStatus.PARTIAL,
-            "failed":  PipelineStatus.FAILED,
+            "failed": PipelineStatus.FAILED,
         }.get(raw_status, PipelineStatus.PARTIAL)
     elif errors:
         status = PipelineStatus.FAILED
     else:
         status = PipelineStatus.PARTIAL
 
-    # Build per-stage results
-    stage_results: list[StageResult] = []
-    stage_field_map = {
-        "repo_analysis":   state.get("repo_analysis"),
-        "root_cause":      state.get("root_cause"),
-        "fix_plan":        state.get("fix_plan"),
-        "code_fix":        {"diff": state.get("code_diff")} if state.get("code_diff") else None,
-        "test_generation": {"tests_present": bool(state.get("generated_tests"))},
-        "verification":    vr,
+    stage_data = {
+        "repo_analysis": state.get("repo_analysis"),
+        "root_cause": state.get("root_cause"),
+        "fix_plan": state.get("fix_plan"),
+        "code_fix": (
+            {"diff": state.get("code_diff")}
+            if state.get("code_diff")
+            else None
+        ),
+        "test_generation": (
+            {"tests_present": bool(state.get("generated_tests"))}
+        ),
+        "verification": verification,
     }
-    for stage_name in PIPELINE_STAGES:
-        output = stage_field_map.get(stage_name)
-        stage_status = PipelineStatus.SUCCESS if output else PipelineStatus.PENDING
-        stage_results.append(StageResult(
-            stage=stage_name,
-            status=stage_status,
-            output=output if isinstance(output, dict) else None,
-        ))
 
-    # Extract top-level report fields
-    test_results_raw = state.get("test_results")
+    stages = []
+
+    for stage_name in PIPELINE_STAGES:
+        output = stage_data.get(stage_name)
+
+        stages.append(
+            StageResult(
+                stage=stage_name,
+                status=(
+                    PipelineStatus.SUCCESS
+                    if output
+                    else PipelineStatus.PENDING
+                ),
+                output=output if isinstance(output, dict) else None,
+            )
+        )
 
     return PipelineResponse(
         job_id=job_id,
         status=status,
         current_stage=state.get("current_stage"),
-        stages=stage_results,
-        bug_summary=vr.get("bug_summary") if vr else None,
-        root_cause_summary=vr.get("root_cause_summary") if vr else None,
-        fix_description=vr.get("fix_description") if vr else None,
+        stages=stages,
+        bug_summary=(
+            verification.get("bug_summary")
+            if verification
+            else None
+        ),
+        root_cause_summary=(
+            verification.get("root_cause_summary")
+            if verification
+            else None
+        ),
+        fix_description=(
+            verification.get("fix_description")
+            if verification
+            else None
+        ),
         code_diff=state.get("code_diff"),
         generated_tests=state.get("generated_tests"),
-        test_results=dict(test_results_raw) if test_results_raw else None,
-        confidence_score=vr.get("confidence_score") if vr else None,
+        test_results=state.get("test_results"),
+        confidence_score=(
+            verification.get("confidence_score")
+            if verification
+            else None
+        ),
         errors=errors,
     )
 
 
-# ---------------------------------------------------------------------------
-# Main service function
-# ---------------------------------------------------------------------------
+def _build_demo_response(
+    bug_report: str,
+    repo_path: str,
+) -> PipelineResponse:
 
-def run_analysis(bug_report: str, repo_path: str) -> PipelineResponse:
-    """
-    Validate inputs, run the full Pitchproof pipeline, and return a response.
+    job_id = str(uuid.uuid4())
 
-    This is the primary entry point called by the route handlers.
+    demo_diff = """--- a/auth.py
++++ b/auth.py
+@@
+-    user = db.find_user(username)
+-    return verify_password(password, user.password_hash)
++    user = db.find_user(username)
++    if user is None:
++        return {"error": "Invalid credentials"}, 401
++    return verify_password(password, user.password_hash)
+"""
 
-    Args:
-        bug_report: Raw bug/error report text from the user.
-        repo_path:  Local path to the repository to analyse.
+    demo_tests = """def test_login_invalid_user_returns_401():
+    # DEMO TEST - NOT EXECUTED
+    assert True
 
-    Returns:
-        PipelineResponse — safe, serialisable result.
 
-    Raises:
-        ValueError: for invalid / unsafe inputs (safe message, no secrets).
-        RuntimeError: for agent execution failures (safe message, no traceback).
-    """
-    # ── Input validation ──────────────────────────────────────────────────
+def test_login_valid_credentials():
+    # DEMO TEST - NOT EXECUTED
+    assert True
+"""
+
+    state = _build_initial_state(
+        bug_report.strip(),
+        str(repo_path),
+    )
+
+    state.update(
+        {
+            "repo_analysis": {
+                "summary": "Repository scanned successfully.",
+                "files_scanned": 6,
+                "languages": ["Python"],
+            },
+            "root_cause": {
+                "summary": (
+                    "The login flow does not safely handle "
+                    "a missing user record before accessing "
+                    "authentication data."
+                ),
+                "location": "auth.py",
+                "confidence": 0.94,
+            },
+            "fix_plan": {
+                "steps": [
+                    "Validate that the user exists before accessing password data.",
+                    "Return a safe authentication error for unknown users.",
+                    "Add regression tests for valid and invalid login cases.",
+                ],
+                "affected_files": ["auth.py"],
+            },
+            "code_diff": demo_diff,
+            "generated_tests": demo_tests,
+            "test_results": {
+                "status": "NOT EXECUTED",
+                "tests_generated": 2,
+            },
+            "verification_report": {
+                "status": "success",
+                "bug_summary": (
+                    "Login endpoint returns HTTP 500 "
+                    "for an authentication request."
+                ),
+                "root_cause_summary": (
+                    "Missing user validation can cause "
+                    "the authentication flow to access "
+                    "unavailable user data."
+                ),
+                "fix_description": (
+                    "Add an explicit user-existence check "
+                    "before password verification."
+                ),
+                "confidence_score": 0.94,
+            },
+            "current_stage": "verification",
+        }
+    )
+
+    return _state_to_response(state, job_id)
+
+
+def run_analysis(
+    bug_report: str,
+    repo_path: str,
+) -> PipelineResponse:
+
     if not bug_report or not bug_report.strip():
         raise ValueError("bug_report must not be empty.")
 
-    validated_path = validate_repo_path(repo_path)  # raises ValueError on bad input
+    validated_path = validate_repo_path(repo_path)
 
-    # ── Run pipeline ──────────────────────────────────────────────────────
+    if DEMO_MODE:
+        return _build_demo_response(
+            bug_report,
+            validated_path,
+        )
+
     job_id = str(uuid.uuid4())
-    initial_state = _build_initial_state(bug_report.strip(), str(validated_path))
+
+    initial_state = _build_initial_state(
+        bug_report.strip(),
+        str(validated_path),
+    )
 
     try:
-        graph  = build_graph()
+        graph = build_graph()
         result = graph.invoke(initial_state)
+
     except Exception as exc:
-        # Log internally (never expose traceback to API client)
-        _log_internal_error("run_analysis", exc)
+        print(
+            "[pitchproof_service] ERROR:",
+            type(exc).__name__,
+            str(exc),
+        )
+
         raise RuntimeError(
             "The analysis pipeline encountered an error. "
             "Check server logs for details."
         ) from None
 
     return _state_to_response(result, job_id)
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _log_internal_error(context: str, exc: Exception) -> None:
-    """Write error details to stderr only — never exposed in API responses."""
-    import sys
-    print(
-        f"[pitchproof_service] ERROR in {context}: {type(exc).__name__}: {exc}",
-        file=sys.stderr,
-    )
-    # Print traceback only to stderr so it never leaks to API clients
-    traceback.print_exc(file=sys.stderr)

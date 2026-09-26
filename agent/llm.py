@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from dotenv import load_dotenv
+
+load_dotenv()
 from functools import lru_cache
 from typing import Optional
 
