@@ -158,8 +158,7 @@ def run_analysis(
         )
 
         raise RuntimeError(
-            "The analysis pipeline encountered an error. "
-            "Check server logs for details."
+            f"Analysis error: {type(exc).__name__}: {exc}"
         ) from None
 
     return _state_to_response(result, job_id)
