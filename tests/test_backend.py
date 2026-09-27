@@ -489,3 +489,137 @@ class TestRunAnalysis:
                 run_analysis("IndexError in utils.py at line 11", SAMPLE_REPO)
             except RuntimeError as exc:
                 assert "SECRET_API_KEY" not in str(exc)
+
+
+# ===========================================================================
+# Regression: DEMO_MODE bypass removed (bug: stale auth.py diagnosis)
+# ===========================================================================
+
+class TestNoDemoModeBypass:
+    """
+    Regression tests verifying that the DEMO_MODE shortcut that returned
+    hardcoded auth.py / missing-user-validation results has been removed.
+
+    The actual pipeline (build_graph) must ALWAYS be called for every
+    run_analysis() invocation, regardless of any environment variable.
+    """
+
+    def _mock_graph_result(self):
+        return {
+            "bug_report":    "IndexError in utils.py at line 11",
+            "repo_url":      SAMPLE_REPO,
+            "repo_analysis": {"suspect_files": ["utils.py"],
+                               "relevant_snippets": [],
+                               "language": "python", "summary": "ok"},
+            "root_cause":    {"explanation": "no bounds check",
+                               "fault_location": "utils.py:11",
+                               "confidence": 0.8},
+            "fix_plan":      {"steps": ["add guard"], "affected_files": ["utils.py"],
+                               "rationale": "prevents IndexError"},
+            "code_diff":     "--- a/utils.py\n+++ b/utils.py\n@@ -9 +9 @@\n-x\n+y",
+            "generated_tests": "def test_get_items_empty():\n    assert True\n",
+            "test_results":  {"passed": 0, "failed": 0, "errors": 0,
+                              "output": "[NOT EXECUTED]"},
+            "verification_report": {
+                "bug_summary": "IndexError when list is empty.",
+                "root_cause_summary": "No bounds check in get_items.",
+                "fix_description": "Add guard before index access.",
+                "diff": "--- a/utils.py\n+++ b/utils.py\n@@ @@\n",
+                "test_results": {"passed": 0, "failed": 0, "errors": 0, "output": ""},
+                "confidence_score": 0.7,
+                "status": "partial",
+            },
+            "current_stage": "verification",
+            "errors": [],
+        }
+
+    def test_demo_mode_env_var_does_not_exist_in_service(self):
+        """DEMO_MODE module-level variable must not exist in the service."""
+        import backend.services.pitchproof_service as svc
+        assert not hasattr(svc, "DEMO_MODE"), (
+            "DEMO_MODE variable must not exist in pitchproof_service — "
+            "it bypasses the pipeline with hardcoded auth.py results."
+        )
+
+    def test_build_demo_response_does_not_exist(self):
+        """_build_demo_response must not exist in the service."""
+        import backend.services.pitchproof_service as svc
+        assert not hasattr(svc, "_build_demo_response"), (
+            "_build_demo_response returns hardcoded stale results and must be removed."
+        )
+
+    def test_graph_always_called_regardless_of_env(self, monkeypatch):
+        """
+        Even if PITCHPROOF_DEMO_MODE=true is set in the environment,
+        run_analysis() must still call build_graph().
+        """
+        monkeypatch.setenv("PITCHPROOF_DEMO_MODE", "true")
+        from backend.services.pitchproof_service import run_analysis
+        mock_graph = MagicMock()
+        mock_graph.invoke.return_value = self._mock_graph_result()
+        with patch("backend.services.pitchproof_service.build_graph",
+                   return_value=mock_graph):
+            run_analysis("IndexError in utils.py at line 11", SAMPLE_REPO)
+        mock_graph.invoke.assert_called_once()
+
+    def test_result_reflects_actual_bug_report(self, monkeypatch):
+        """
+        The response must reflect the supplied bug report, not a hardcoded one.
+        No auth.py / authentication content should appear when the input
+        describes an IndexError in utils.py.
+        """
+        monkeypatch.setenv("PITCHPROOF_DEMO_MODE", "true")
+        from backend.services.pitchproof_service import run_analysis
+        mock_graph = MagicMock()
+        mock_graph.invoke.return_value = self._mock_graph_result()
+        with patch("backend.services.pitchproof_service.build_graph",
+                   return_value=mock_graph):
+            result = run_analysis(
+                "IndexError in utils.py at line 11", SAMPLE_REPO
+            )
+        # Must reference utils.py, not the hardcoded auth.py
+        assert result.code_diff is not None
+        assert "auth.py" not in (result.code_diff or ""), (
+            "Response must not contain hardcoded auth.py diff."
+        )
+
+    def test_result_uses_graph_root_cause(self, monkeypatch):
+        """
+        root_cause_summary must come from the graph result, not a hardcoded value.
+        """
+        monkeypatch.setenv("PITCHPROOF_DEMO_MODE", "true")
+        from backend.services.pitchproof_service import run_analysis
+        mock_graph = MagicMock()
+        mock_graph.invoke.return_value = self._mock_graph_result()
+        with patch("backend.services.pitchproof_service.build_graph",
+                   return_value=mock_graph):
+            result = run_analysis(
+                "IndexError in utils.py at line 11", SAMPLE_REPO
+            )
+        # Must not contain the hardcoded auth copy
+        assert "missing user record" not in (result.root_cause_summary or "").lower()
+        assert "authentication" not in (result.root_cause_summary or "").lower()
+
+    def test_affected_file_not_invented(self, monkeypatch):
+        """
+        Affected file in the graph response (utils.py) must pass through;
+        the hardcoded auth.py must not appear.
+        """
+        monkeypatch.setenv("PITCHPROOF_DEMO_MODE", "true")
+        from backend.services.pitchproof_service import run_analysis
+        mock_graph = MagicMock()
+        mock_graph.invoke.return_value = self._mock_graph_result()
+        with patch("backend.services.pitchproof_service.build_graph",
+                   return_value=mock_graph):
+            result = run_analysis(
+                "IndexError in utils.py at line 11", SAMPLE_REPO
+            )
+        # The fix_plan stage output must reference what the graph returned
+        fix_stage = next(
+            (s for s in result.stages if s.stage == "fix_plan"), None
+        )
+        if fix_stage and fix_stage.output:
+            files = fix_stage.output.get("affected_files", [])
+            assert "auth.py" not in files, (
+                "Hardcoded auth.py must not appear as an affected file."
+            )

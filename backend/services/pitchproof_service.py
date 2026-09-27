@@ -7,9 +7,6 @@ from agent.graph import build_graph
 from backend.models.schemas import PipelineResponse, PipelineStatus, StageResult
 
 
-DEMO_MODE = os.environ.get("PITCHPROOF_DEMO_MODE", "false").lower() == "true"
-
-
 def validate_repo_path(repo_path: str) -> Path:
     if not repo_path or not repo_path.strip():
         raise ValueError("Repository path must not be empty.")
@@ -126,93 +123,6 @@ def _state_to_response(state: Dict[str, Any], job_id: str) -> PipelineResponse:
     )
 
 
-def _build_demo_response(
-    bug_report: str,
-    repo_path: str,
-) -> PipelineResponse:
-
-    job_id = str(uuid.uuid4())
-
-    demo_diff = """--- a/auth.py
-+++ b/auth.py
-@@
--    user = db.find_user(username)
--    return verify_password(password, user.password_hash)
-+    user = db.find_user(username)
-+    if user is None:
-+        return {"error": "Invalid credentials"}, 401
-+    return verify_password(password, user.password_hash)
-"""
-
-    demo_tests = """def test_login_invalid_user_returns_401():
-    # DEMO TEST - NOT EXECUTED
-    assert True
-
-
-def test_login_valid_credentials():
-    # DEMO TEST - NOT EXECUTED
-    assert True
-"""
-
-    state = _build_initial_state(
-        bug_report.strip(),
-        str(repo_path),
-    )
-
-    state.update(
-        {
-            "repo_analysis": {
-                "summary": "Repository scanned successfully.",
-                "files_scanned": 6,
-                "languages": ["Python"],
-            },
-            "root_cause": {
-                "summary": (
-                    "The login flow does not safely handle "
-                    "a missing user record before accessing "
-                    "authentication data."
-                ),
-                "location": "auth.py",
-                "confidence": 0.94,
-            },
-            "fix_plan": {
-                "steps": [
-                    "Validate that the user exists before accessing password data.",
-                    "Return a safe authentication error for unknown users.",
-                    "Add regression tests for valid and invalid login cases.",
-                ],
-                "affected_files": ["auth.py"],
-            },
-            "code_diff": demo_diff,
-            "generated_tests": demo_tests,
-            "test_results": {
-                "status": "NOT EXECUTED",
-                "tests_generated": 2,
-            },
-            "verification_report": {
-                "status": "success",
-                "bug_summary": (
-                    "Login endpoint returns HTTP 500 "
-                    "for an authentication request."
-                ),
-                "root_cause_summary": (
-                    "Missing user validation can cause "
-                    "the authentication flow to access "
-                    "unavailable user data."
-                ),
-                "fix_description": (
-                    "Add an explicit user-existence check "
-                    "before password verification."
-                ),
-                "confidence_score": 0.94,
-            },
-            "current_stage": "verification",
-        }
-    )
-
-    return _state_to_response(state, job_id)
-
-
 def run_analysis(
     bug_report: str,
     repo_path: str,
@@ -222,12 +132,6 @@ def run_analysis(
         raise ValueError("bug_report must not be empty.")
 
     validated_path = validate_repo_path(repo_path)
-
-    if DEMO_MODE:
-        return _build_demo_response(
-            bug_report,
-            validated_path,
-        )
 
     job_id = str(uuid.uuid4())
 

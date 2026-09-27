@@ -22,19 +22,14 @@ from agent.llm import get_llm_client
 from agent.state import PitchproofState, RepoAnalysis, RootCause
 
 
-# ---------------------------------------------------------------------------
-# Prompt builder
-# ---------------------------------------------------------------------------
-
 def _build_prompt(bug_report: str, repo_analysis: RepoAnalysis) -> str:
-    """
-    Assemble the root-cause analysis prompt sent to the LLM.
+    """Build the structured root-cause prompt."""
 
-    The prompt asks for a structured response with clearly delimited fields
-    so it can be parsed without relying on exact JSON formatting.
-    """
-    snippets_block = "\n\n".join(repo_analysis.get("relevant_snippets") or [])
-    suspect_list   = "\n".join(
+    snippets_block = "\n\n".join(
+        repo_analysis.get("relevant_snippets") or []
+    )
+
+    suspect_list = "\n".join(
         f"  - {f}" for f in (repo_analysis.get("suspect_files") or [])
     ) or "  (none identified)"
 
@@ -56,13 +51,18 @@ def _build_prompt(bug_report: str, repo_analysis: RepoAnalysis) -> str:
 ## Task
 Analyse the bug report and code evidence above. Provide a structured root-cause analysis.
 
-Respond EXACTLY in this format (do not add extra sections):
+IMPORTANT:
+- Only identify a fault location that exists in the Suspect Files above.
+- Do not invent filenames.
+- Do not use files that are not present in the supplied repository evidence.
+
+Respond EXACTLY in this format:
 
 EXPLANATION:
 <one or two paragraphs explaining the root cause>
 
 FAULT_LOCATION:
-<file_path:line_number or best guess>
+<file_path:line_number>
 
 CONFIDENCE:
 <a number between 0.0 and 1.0>
@@ -72,49 +72,104 @@ RECOMMENDED_FIX_DIRECTION:
 """
 
 
-# ---------------------------------------------------------------------------
-# Response parser
-# ---------------------------------------------------------------------------
-
 _SECTION_RE = re.compile(
     r"(EXPLANATION|FAULT_LOCATION|CONFIDENCE|RECOMMENDED_FIX_DIRECTION)"
-    r"\s*:\s*\n(.*?)(?=\n(?:EXPLANATION|FAULT_LOCATION|CONFIDENCE|RECOMMENDED_FIX_DIRECTION)\s*:|$)",
+    r"\s*:\s*\n(.*?)(?=\n(?:EXPLANATION|FAULT_LOCATION|CONFIDENCE|RECOMMENDED_FIX_DIRECTION)"
+    r"\s*:|$)",
     re.DOTALL | re.IGNORECASE,
 )
 
 
-def _parse_llm_response(response: str, bug_report: str) -> RootCause:
-    """
-    Parse the structured LLM output into a RootCause dict.
+def _parse_llm_response(
+    response: str,
+    bug_report: str,
+    repo_analysis: RepoAnalysis,
+) -> RootCause:
+    """Parse structured LLM output and validate its fault location."""
 
-    Falls back to sensible defaults if a section is missing or malformed.
-    """
     sections: dict[str, str] = {}
+
     for match in _SECTION_RE.finditer(response):
-        key   = match.group(1).upper()
+        key = match.group(1).upper()
         value = match.group(2).strip()
         sections[key] = value
 
-    # ── Explanation ──────────────────────────────────────────────────────
     explanation = sections.get("EXPLANATION", "").strip()
+
     if not explanation:
-        # Fall back: use the entire response if parsing failed
         explanation = response.strip() or (
             "Root cause could not be determined from the available information. "
             f"Bug report: {bug_report[:200]}"
         )
 
-    # ── Fault location ───────────────────────────────────────────────────
     fault_location = sections.get("FAULT_LOCATION", "unknown:0").strip()
-    if not fault_location or fault_location.lower() in {"unknown", "n/a", ""}:
+
+    # Repository analysis is authoritative for the fault file.
+    # Never allow the LLM to invent a file outside the analyzed repository.
+    suspect_files = repo_analysis.get("suspect_files") or []
+
+    if suspect_files:
+        claimed_file = fault_location.split(":", 1)[0].strip()
+        normalized_claim = claimed_file.replace("\\", "/").lower()
+
+        matched_file = None
+
+        for path in suspect_files:
+            normalized_path = str(path).replace("\\", "/").lower()
+
+            if normalized_claim == normalized_path:
+                matched_file = str(path)
+                break
+
+            if normalized_claim == normalized_path.rsplit("/", 1)[-1]:
+                matched_file = str(path)
+                break
+
+        if matched_file is None:
+            # The LLM hallucinated a file. Use repository evidence.
+            fault_location = f"{suspect_files[0]}:0"
+        else:
+            # Keep the LLM's line number only when the file is valid.
+            line_part = fault_location.split(":", 1)[1] if ":" in fault_location else "0"
+            fault_location = f"{matched_file}:{line_part}"
+
+    elif not fault_location or fault_location.lower() in {"unknown", "n/a", ""}:
         fault_location = "unknown:0"
 
-    # ── Confidence ───────────────────────────────────────────────────────
+    # Validate the LLM's claimed file against repository evidence.
+    # This prevents hallucinated paths such as auth.py.
+    suspect_files = repo_analysis.get("suspect_files") or []
+
+    if suspect_files:
+        claimed_file = fault_location.split(":", 1)[0].strip()
+        claimed_file_normalized = claimed_file.replace("\\", "/").lower()
+
+        normalized_files = [
+            str(path).replace("\\", "/").lower()
+            for path in suspect_files
+        ]
+
+        valid_files = set(normalized_files)
+
+        claimed_basename = claimed_file_normalized.rsplit("/", 1)[-1]
+
+        valid_basenames = {
+            path.rsplit("/", 1)[-1]
+            for path in normalized_files
+        }
+
+        if (
+            claimed_file_normalized not in valid_files
+            and claimed_basename not in valid_basenames
+        ):
+            fault_location = f"{suspect_files[0]}:0"
+
     confidence = 0.0
     raw_conf = sections.get("CONFIDENCE", "0").strip()
+
     try:
         confidence = float(raw_conf)
-        confidence = max(0.0, min(1.0, confidence))   # clamp to [0, 1]
+        confidence = max(0.0, min(1.0, confidence))
     except ValueError:
         confidence = 0.0
 
@@ -125,10 +180,6 @@ def _parse_llm_response(response: str, bug_report: str) -> RootCause:
     )
 
 
-# ---------------------------------------------------------------------------
-# Node
-# ---------------------------------------------------------------------------
-
 def root_cause(state: PitchproofState) -> dict:
     """
     Determine the root cause of the bug using LLM reasoning.
@@ -136,10 +187,10 @@ def root_cause(state: PitchproofState) -> dict:
     Reads:   state["bug_report"], state["repo_analysis"]
     Writes:  state["root_cause"], state["current_stage"]
     """
-    bug_report:    str                     = state.get("bug_report", "")
+
+    bug_report: str = state.get("bug_report", "")
     repo_analysis: Optional[RepoAnalysis] = state.get("repo_analysis")
 
-    # ── Guard: if repo_analysis is missing, create a minimal fallback ────
     if repo_analysis is None:
         repo_analysis = RepoAnalysis(
             suspect_files=[],
@@ -148,15 +199,23 @@ def root_cause(state: PitchproofState) -> dict:
             summary="Repository analysis was not available.",
         )
 
-    # ── Build prompt and call LLM ────────────────────────────────────────
-    prompt   = _build_prompt(bug_report, repo_analysis)
-    llm      = get_llm_client()
-    response = llm.invoke(prompt, max_tokens=1024, temperature=0.2)
+    prompt = _build_prompt(bug_report, repo_analysis)
 
-    # ── Parse structured response ────────────────────────────────────────
-    result = _parse_llm_response(response, bug_report)
+    llm = get_llm_client()
+
+    response = llm.invoke(
+        prompt,
+        max_tokens=1024,
+        temperature=0.2,
+    )
+
+    result = _parse_llm_response(
+        response,
+        bug_report,
+        repo_analysis,
+    )
 
     return {
-        "root_cause":    result,
+        "root_cause": result,
         "current_stage": "fix_plan",
     }
