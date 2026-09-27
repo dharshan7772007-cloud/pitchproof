@@ -841,10 +841,13 @@ def main() -> None:
                 height=160,
             )
 
+            default_repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tests", "fixtures", "sample_repo"))
+
             repo_path = st.text_input(
                 "REPOSITORY PATH",
+                value=default_repo,
                 placeholder="/path/to/your/local/repository",
-                help="Local filesystem path to the repository directory to analyse.",
+                help="Defaults to the bundled Pitchproof demo repository.",
             )
 
             context = st.text_area(
