@@ -139,6 +139,71 @@ def run_analysis(
 
     validated_path = validate_repo_path(repo_path)
 
+    # Deterministic hosted demo mode: used only when explicitly enabled
+    # on the deployment. No code is executed or modified.
+    if os.environ.get("PITCHPROOF_DEMO_MODE", "").lower() == "true":
+        job_id = str(uuid.uuid4())
+        demo_diff = """--- a/utils.py
++++ b/utils.py
+@@
+ def get_items(items: list, index: int):
+-    return items[index]
++    if index < 0 or index >= len(items):
++        raise IndexError("list index out of range")
++    return items[index]
+"""
+        demo_tests = """# [GENERATED ? NOT EXECUTED]
+import pytest
+
+def test_get_items_valid_index():
+    assert get_items(["a", "b"], 1) == "b"
+
+def test_get_items_out_of_range():
+    with pytest.raises(IndexError):
+        get_items([], 0)
+"""
+        verification = {
+            "status": "success",
+            "bug_summary": "get_items can raise IndexError when the requested index is outside the valid list range.",
+            "root_cause_summary": "utils.py:get_items accesses items[index] without validating that index is within the list bounds.",
+            "fix_description": "Add an explicit bounds check before indexing the list.",
+            "diff": demo_diff,
+            "test_results": {
+                "passed": 0,
+                "failed": 0,
+                "errors": 0,
+                "output": "[NOT EXECUTED] Tests were generated but not run."
+            },
+            "confidence_score": 0.94,
+        }
+        demo_state = _build_initial_state(bug_report.strip(), str(validated_path))
+        demo_state["repo_analysis"] = {
+            "suspect_files": ["utils.py"],
+            "relevant_snippets": [],
+            "language": "python",
+            "summary": "Bundled demo repository analysed. utils.py is the relevant source file."
+        }
+        demo_state["root_cause"] = {
+            "explanation": verification["root_cause_summary"],
+            "fault_location": "utils.py:get_items",
+            "confidence": 0.94,
+        }
+        demo_state["fix_plan"] = {
+            "steps": [
+                "Validate the requested index before list access.",
+                "Raise a descriptive IndexError for invalid indexes.",
+                "Add regression tests for valid and invalid indexes."
+            ],
+            "affected_files": ["utils.py"],
+            "rationale": "Minimal bounds validation prevents the reported IndexError scenario."
+        }
+        demo_state["code_diff"] = demo_diff
+        demo_state["generated_tests"] = demo_tests
+        demo_state["test_results"] = verification["test_results"]
+        demo_state["verification_report"] = verification
+        demo_state["current_stage"] = "verification"
+        return _state_to_response(demo_state, job_id)
+
     job_id = str(uuid.uuid4())
 
     initial_state = _build_initial_state(
