@@ -16,6 +16,12 @@ def validate_repo_path(repo_path: str) -> Path:
 
     path = Path(repo_path.strip()).resolve()
 
+    # Streamlit Cloud sends its own source path to the API.
+    # The FastAPI service runs in a separate container, so map the bundled
+    # demo repository to the copy included with this backend deployment.
+    if str(path).replace("\\", "/").endswith("/tests/fixtures/sample_repo"):
+        path = (Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "sample_repo").resolve()
+
     if not path.exists():
         raise ValueError("Repository path does not exist.")
 
